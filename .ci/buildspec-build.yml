@@ -1,0 +1,22 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      #- yum update -y
+      - yum install jq
+      - pip install cfn-lint
+      - pip install taskcat
+      - gem install cfn-nag -v 0.7.2
+  build:
+    commands:
+      - echo Starting build $(date) in $(pwd)
+      - bash .ci/run-validation.sh $ARTIFACT_BUCKET blog/template
+      - bash .ci/run-validation.sh $ARTIFACT_BUCKET cfct/template
+      - bash .ci/prep-taskcat.sh test/.taskcat.yml $TASKCAT_BUCKET '#TASKCAT_BUCKET'
+      - taskcat package -p ./ -s functions/source/ -z functions/packages/ -c test/.taskcat.yml
+      - taskcat upload -c test/.taskcat.yml
+artifacts:
+  files:
+      - '**/*'

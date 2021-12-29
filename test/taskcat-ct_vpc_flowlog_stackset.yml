@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Taskcat test StackSet for ct_vpc_flowlog_master_stack.yml
+Parameters:
+  tCatTargetAccounts:
+    Type: CommaDelimitedList
+    Description: StackInstancesGroup-DeploymentTargets-Accounts (list)
+  tCatTargetRegion:
+    Type: String
+    Description: Target region to launch TaskCat test StackSet
+  StackSetName:
+    Type: String
+    Description: Name of the StackSet
+  OrgId:
+    Type: String
+    Description: The Amazon Organizations ID
+    MinLength: 12
+    MaxLength: 12
+    AllowedPattern: '^[o][\-][a-z0-9]{10}$'
+    ConstraintDescription: The Org Id must be a 12 character string starting with o- and followed by 10 lower case alphanumeric characters
+  MasterAccount:
+    Type: String
+    Description: AWS Account ID where the Control Tower deployed
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  MasterRegion:
+    Type: String
+    Description: Region where the Control Tower deployed    
+    Default: 'us-east-1'
+  FlowLogDestinationAccount:
+    Type: String
+    Description: AWS Account ID where the VPC Flow Log bucket will be created
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  FlowLogBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: '[a-zA-Z0-9-.]*'
+    Description: Unique name for the S3 bucket in the destination account
+  EventBusDestinationAccount:
+    Type: String
+    Description: AWS Account ID where the dedicated Event bus will be created
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  EventBusName:
+    Type: String
+    Description: Select name of the dedicated event bus that will be created at the Hub account
+    Default: FlowLog-EventBus
+  ComplianceFrequency:
+    Type: Number
+    Default: "24"
+    Description: Frequency (in hours between 2 and 168, default is 24) to check Flow Logs compliance
+    MinValue: 2
+    MaxValue: 168
+    ConstraintDescription: Compliance Frequency must be a number between 2 and 168, inclusive.
+  QSS3BucketName:
+    Type: String
+    Default: wellsiau-quickstart
+    Description: "S3 bucket for the solution assets. Use this if you want to customize your deployment. The bucket name can include numbers, lowercase letters, uppercase letters, and hyphens, but it cannot start or end with hyphens (-)."
+  QSS3KeyPrefix:
+    Type: String
+    Default: ct-vpc-flow-log/
+    Description: "S3 key prefix to simulate a directory for Quick Start assets. Use this if you want to customize your deployment. The prefix can include numbers, lowercase letters, uppercase letters, hyphens (-), and forward slashes (/). For more information, see https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingMetadata.html."
+Resources:
+  FlowLogStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties: 
+      StackSetName: ct-vpc-flowlog-stackset
+      TemplateURL: !Sub 'https://${QSS3BucketName}.s3.amazonaws.com/${QSS3KeyPrefix}blog/template/ct_vpc_flowlog_stackset.yml'
+      AdministrationRoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/service-role/AWSControlTowerStackSetRole
+      CallAs: SELF
+      Capabilities: 
+        - CAPABILITY_NAMED_IAM
+      Description: Test StackSet for ct_vpc_flowlog_master_stack.yml
+      ExecutionRoleName: AWSControlTowerExecution
+      Parameters: 
+        - ParameterKey: StackSetName
+          ParameterValue: !Ref StackSetName
+        - ParameterKey: OrgId
+          ParameterValue: !Ref OrgId
+        - ParameterKey: MasterAccount
+          ParameterValue: !Ref MasterAccount
+        - ParameterKey: MasterRegion
+          ParameterValue: !Ref MasterRegion
+        - ParameterKey: FlowLogDestinationAccount
+          ParameterValue: !Ref FlowLogDestinationAccount
+        - ParameterKey: FlowLogBucketName
+          ParameterValue: !Ref FlowLogBucketName
+        - ParameterKey: EventBusDestinationAccount
+          ParameterValue: !Ref EventBusDestinationAccount
+        - ParameterKey: EventBusName
+          ParameterValue: !Ref EventBusName
+        - ParameterKey: ComplianceFrequency
+          ParameterValue: !Ref ComplianceFrequency
+        - ParameterKey: QSS3BucketName
+          ParameterValue: !Ref QSS3BucketName
+        - ParameterKey: QSS3KeyPrefix
+          ParameterValue: !Ref QSS3KeyPrefix
+      PermissionModel: SELF_MANAGED
+      StackInstancesGroup: 
+        - DeploymentTargets: 
+            Accounts: !Ref tCatTargetAccounts
+          Regions: 
+            - !Ref tCatTargetRegion

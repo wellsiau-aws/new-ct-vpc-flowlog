@@ -1,0 +1,5 @@
+templates:
+  - blog/template/**/*.yml
+  - cfct/template/**/*.template
+include_checks:
+  - I

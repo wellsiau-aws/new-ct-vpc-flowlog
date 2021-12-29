@@ -1,0 +1,16 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      #- yum update -y
+      - pip install taskcat
+  build:
+    commands:
+      - echo Starting build $(date) in $(pwd)
+      - bash .ci/prep-taskcat.sh test/.taskcat.yml $QS_BUCKET $TASKCAT_BUCKET
+      - taskcat upload -c test/.taskcat.yml
+artifacts:
+  files:
+      - '**/*'

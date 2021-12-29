@@ -1,0 +1,7 @@
+#!/bin/bash
+TASKCAT_FILENAME=$1
+TASKCAT_NEW_BUCKET=$2
+TASKCAT_OLD_BUCKET=$3
+echo "Replace taskcat bucket with the new input"
+sed -i 's/'"$TASKCAT_OLD_BUCKET"'/'"$TASKCAT_NEW_BUCKET"'/' $TASKCAT_FILENAME
+cat $TASKCAT_FILENAME

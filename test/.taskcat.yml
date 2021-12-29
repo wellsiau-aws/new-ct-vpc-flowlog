@@ -1,0 +1,51 @@
+--- 
+general: 
+  s3_bucket: "#TASKCAT_BUCKET"
+project :  
+  name: ct-vpc-flow-log
+  owner: wellsiau@amazon.com
+  shorten_stack_name: true
+  s3_object_acl: public-read
+tests:
+  ct-vpc-flowlog-master:
+    template: blog/template/ct_vpc_flowlog_master_stack.yml
+    parameters: 
+     OrgId: "$[taskcat_ssm_/ct/vpc-flowlog/OrganizationId]"
+     EventBusDestinationAccount: "$[taskcat_ssm_/ct/vpc-flowlog/EventBusDestinationAccount]"
+     StackSetArn: "$[taskcat_ssm_/ct/vpc-flowlog/StackSetArn]"
+     QSS3BucketName: "$[taskcat_ssm_/ct/vpc-flowlog/tCatBucketName]"
+     QSS3KeyPrefix: "$[taskcat_ssm_/ct/vpc-flowlog/tCatKeyPrefix]"
+    regions:
+      - us-east-1
+  ct-vpc-flowlog-stackset:
+    template: test/taskcat-ct_vpc_flowlog_stackset.yml
+    parameters: 
+      tCatTargetAccounts: "$[taskcat_ssm_/ct/vpc-flowlog/tCatTargetAccounts]"
+      tCatTargetRegion: "$[taskcat_ssm_/ct/vpc-flowlog/tCatTargetRegion]"
+      StackSetName: "$[taskcat_ssm_/ct/vpc-flowlog/StackSetName]"
+      OrgId: "$[taskcat_ssm_/ct/vpc-flowlog/OrganizationId]"
+      MasterAccount: "$[taskcat_ssm_/ct/vpc-flowlog/MasterAccount]"
+      MasterRegion: "$[taskcat_ssm_/ct/vpc-flowlog/MasterRegion]"
+      FlowLogDestinationAccount: "$[taskcat_ssm_/ct/vpc-flowlog/FlowLogDestinationAccount]"
+      FlowLogBucketName: "$[taskcat_ssm_/ct/vpc-flowlog/FlowLogBucketName]"
+      EventBusDestinationAccount: "$[taskcat_ssm_/ct/vpc-flowlog/EventBusDestinationAccount]"
+      EventBusName: "$[taskcat_ssm_/ct/vpc-flowlog/EventBusName]"
+      ComplianceFrequency: "$[taskcat_ssm_/ct/vpc-flowlog/ComplianceFrequency]"
+    regions:
+      - us-east-1
+  mgt-prep:
+    template: cfct/template/management_prep.template
+    parameters: 
+     OrganizationId: "$[taskcat_ssm_/ct/vpc-flowlog/OrganizationId]"
+     ManagementAccountId: "$[taskcat_ssm_/ct/vpc-flowlog/ManagementAccountId]"
+     NameforSSMParameterforOrganizationId: "$[taskcat_ssm_/ct/vpc-flowlog/NameforSSMParameterforOrganizationId]"
+    regions:
+      - us-east-1
+  vpc-flowlog-logging-bucket:
+    template: cfct/template/vpc_flowlog_logging_bucket.template
+    parameters: 
+     OrganizationId: "$[taskcat_ssm_/ct/vpc-flowlog/OrganizationId]"
+     SSEAlgorithm: "$[taskcat_ssm_/ct/vpc-flowlog/SSEAlgorithm]"
+     KMSMasterKeyID: "$[taskcat_ssm_/ct/vpc-flowlog/KMSMasterKeyID]"
+    regions:
+      - us-east-1

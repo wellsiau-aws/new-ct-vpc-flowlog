@@ -68,7 +68,7 @@ Resources:
   FlowLogStackSet:
     Type: AWS::CloudFormation::StackSet
     Properties: 
-      StackSetName: ct-vpc-flowlog-stackset
+      StackSetName: !Ref StackSetName
       TemplateURL: !Sub 'https://${QSS3BucketName}.s3.amazonaws.com/${QSS3KeyPrefix}blog/template/ct_vpc_flowlog_stackset.yml'
       AdministrationRoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/service-role/AWSControlTowerStackSetRole
       CallAs: SELF

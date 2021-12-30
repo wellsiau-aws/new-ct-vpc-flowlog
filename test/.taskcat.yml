@@ -31,6 +31,8 @@ tests:
       EventBusDestinationAccount: "$[taskcat_ssm_/ct/vpc-flowlog/EventBusDestinationAccount]"
       EventBusName: "$[taskcat_ssm_/ct/vpc-flowlog/EventBusName]"
       ComplianceFrequency: "$[taskcat_ssm_/ct/vpc-flowlog/ComplianceFrequency]"
+      QSS3BucketName: "$[taskcat_ssm_/ct/vpc-flowlog/tCatBucketName]"
+      QSS3KeyPrefix: "$[taskcat_ssm_/ct/vpc-flowlog/tCatKeyPrefix]"
     regions:
       - us-east-1
   mgt-prep:

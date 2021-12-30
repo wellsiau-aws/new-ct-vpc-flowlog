@@ -1,0 +1,960 @@
+# Copyright 2012-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# A copy of the License is located at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# or in the "license" file accompanying this file. This file is distributed
+# on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
+# express or implied. See the License for the specific language governing
+# permissions and limitations under the License.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "AWS CT VPC FlowLog - CI/CD Pipeline - multi branch"
+Parameters:
+  GitHubBranchName:
+    Description: "GitHub branch name"
+    Type: String
+    Default: "main"
+  GitHubRepositoryName:
+    Description: "GitHub repository name"
+    Type: String
+  GitHubOwner:
+    Description: "GitHub reporitoy owner name"
+    Type: String
+  GitHubCodeStarConnection:
+    Description: "CodeStar connection to GitHub (https://console.aws.amazon.com/codesuite/settings/connections/create)"
+    Type: String
+  DeploySSMParameters:
+    Description: "Select yes if you wish to create SSM parameters to store all TaskCat test parameters"
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'Yes'
+    Type: String
+  PipelineBranch:
+    Description: "Select between main (prod) and develop (test) branch, or select mix if you choose to use single pipeline"
+    AllowedValues:
+      - 'main'
+      - 'develop'
+      - 'mix'
+    Type: String
+  PipelineApprovalStage:
+    Description: Do you want to add a manual approval stage?
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'No'
+    Type: String
+  PipelineApprovalEmail:
+    Description: (Not required if Pipeline Approval Stage = 'No') Email for notifying that the pipeline is waiting for an Approval
+    Type: String
+#### SSM PARAMS ####
+  OrgId:
+    Type: String
+    Description: The Amazon Organizations ID
+    MinLength: 12
+    MaxLength: 12
+    AllowedPattern: '^[o][\-][a-z0-9]{10}$'
+    ConstraintDescription: The Org Id must be a 12 character string starting with o- and followed by 10 lower case alphanumeric characters
+  StackSetArn:
+    Type: String
+    Description: ARN of the StackSet deployed from Control Tower Master account (ct_vpc_flowlog_master_stack.yml)
+  TaskCatBucket:
+    Type: String
+    Description: "Name of S3 bucket to be created to store taskcat output"
+  TaskCatKeyPrefix:
+    Type: String
+    Description: "S3 key prefix to simulate a directory for Quick Start assets. Use this if you want to customize your deployment. The prefix can include numbers, lowercase letters, uppercase letters, hyphens (-), and forward slashes (/). For more information, see https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingMetadata.html."
+  QSS3BucketName:
+    Type: String
+    Description: "Name of S3 bucket to be created to store final solutions assets"
+  QSS3KeyPrefix:
+    Type: String
+    Description: "S3 key prefix to simulate a directory for Quick Start assets. Use this if you want to customize your deployment. The prefix can include numbers, lowercase letters, uppercase letters, hyphens (-), and forward slashes (/). For more information, see https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingMetadata.html."
+  StackSetName:
+    Type: String
+    Description: Name of the StackSet
+  MasterAccount:
+    Type: String
+    Description: AWS Account ID where the Control Tower deployed
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  MasterRegion:
+    Type: String
+    Description: Region where the Control Tower deployed    
+  FlowLogDestinationAccount:
+    Type: String
+    Description: AWS Account ID where the VPC Flow Log bucket will be created
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  FlowLogBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: '[a-zA-Z0-9-.]*'
+    Description: Unique name for the S3 bucket in the destination account
+  EventBusDestinationAccount:
+    Type: String
+    Description: AWS Account ID where the dedicated Event bus will be created
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  EventBusName:
+    Type: String
+    Description: Select name of the dedicated event bus that will be created at the Hub account
+  ComplianceFrequency:
+    Type: Number
+    Description: Frequency (in hours between 2 and 168, default is 24) to check Flow Logs compliance
+    MinValue: 2
+    MaxValue: 168
+    ConstraintDescription: Compliance Frequency must be a number between 2 and 168, inclusive.
+  TaskCatTargetAccounts:
+    Type: String
+    Description: "comma delimited list of stackset target accounts for test"
+  TaskCatTargetRegions:
+    Type: String
+    Description: "comma delimited list of stackset target regions for test"
+Conditions:
+  IsPipelineApprovalStageCondition: !Equals [!Ref PipelineApprovalStage, 'Yes']
+  IsPipelineProd: !Or 
+    - !Equals
+      - !Ref PipelineBranch
+      - "main"
+    - !Equals 
+      - !Ref PipelineBranch
+      - "mix"
+  IsPipelineTest: !Or 
+    - !Equals
+      - !Ref PipelineBranch
+      - "develop"
+    - !Equals 
+      - !Ref PipelineBranch
+      - "mix"
+  IsDeploySSMParams: !Equals [!Ref DeploySSMParameters, 'Yes']
+Mappings:
+  KMS:
+    Alias:
+      main: CTFlowLogMainPipelineKMSKey
+      develop: CTFlowLogDevelopPipelineKMSKey
+      mix: CTFlowLogMixPipelineKMSKey
+Resources:
+  PipelineKMSKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: "KMS key for CT FlowLog pipeline"
+      KeyPolicy: 
+        Version: 2012-10-17
+        Id: "key-default-1"
+        Statement:
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action:
+              - 'kms:Create*'
+              - 'kms:Describe*'
+              - 'kms:Enable*'
+              - 'kms:List*'
+              - 'kms:Put*'
+              - 'kms:Update*'
+              - 'kms:Revoke*'
+              - 'kms:Disable*'
+              - 'kms:Get*'
+              - 'kms:Delete*'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:CancelKeyDeletion'
+            Resource: '*'
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              Service: 'events.amazonaws.com'
+              AWS: 
+                - !GetAtt CTFlowLogCodePipelineRole.Arn
+                - !GetAtt CTFlowLogCodeBuildRole.Arn
+                - !If
+                  - IsPipelineProd
+                  - !GetAtt CTFlowLogCodeBuildProdRole.Arn
+                  - !Ref AWS::NoValue
+                - !If
+                  - IsPipelineTest
+                  - !GetAtt CTFlowLogCodeBuildTestRole.Arn
+                  - !Ref AWS::NoValue
+            Action:
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+            Resource: '*'
+  
+  PipelineKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties: 
+      AliasName:
+        !Sub
+          - alias/${KMSKeyName}
+          - {KMSKeyName: !FindInMap [KMS, Alias, !Ref PipelineBranch]}
+      TargetKeyId: !Ref PipelineKMSKey
+
+  PipelineApprovalTopic:
+    Type: AWS::SNS::Topic
+    Condition: IsPipelineApprovalStageCondition
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+      Subscription:
+      - Endpoint: !Ref PipelineApprovalEmail
+        Protocol: email
+
+  CTFlowLogTaskCatS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref TaskCatBucket
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: False
+        BlockPublicPolicy: True
+        IgnorePublicAcls: False
+        RestrictPublicBuckets: True
+  
+  CTFlowLogTaskCatS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CTFlowLogTaskCatS3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyDeleteBucket
+            Effect: Deny
+            Principal: "*"
+            Action: s3:DeleteBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${CTFlowLogTaskCatS3Bucket}
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Join ['',['arn:aws:s3:::',!Ref CTFlowLogTaskCatS3Bucket]]
+              - !Join ['',['arn:aws:s3:::',!Ref CTFlowLogTaskCatS3Bucket, /*]]
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  
+  CTFlowLogQSS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref QSS3BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: False
+        BlockPublicPolicy: True
+        IgnorePublicAcls: False
+        RestrictPublicBuckets: True
+  
+  CTFlowLogQSS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CTFlowLogQSS3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyDeleteBucket
+            Effect: Deny
+            Principal: "*"
+            Action: s3:DeleteBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${CTFlowLogQSS3Bucket}
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Join ['',['arn:aws:s3:::',!Ref CTFlowLogQSS3Bucket]]
+              - !Join ['',['arn:aws:s3:::',!Ref CTFlowLogQSS3Bucket, /*]]
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+                
+  CTFlowLogPipelineArtifactS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+
+  CTFlowLogPipelineArtifactS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CTFlowLogPipelineArtifactS3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyDeleteBucket
+            Effect: Deny
+            Principal: "*"
+            Action: s3:DeleteBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Join ['',['arn:aws:s3:::',!Ref CTFlowLogPipelineArtifactS3Bucket]]
+              - !Join ['',['arn:aws:s3:::',!Ref CTFlowLogPipelineArtifactS3Bucket, /*]]
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  CTFlowLogCodeBuildRole:
+    Type: "AWS::IAM::Role"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "Allow Resource * for Cloudformation/SSM API: needs to support user defined cfn templates and ssm parameter names."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "CTFlowLog-CodeBuild-Policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}/*
+                  - !Sub arn:${AWS::Partition}:s3:::${TaskCatBucket}/*
+              - Effect: "Allow"
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${TaskCatBucket}
+              - Effect: "Allow"
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}/*
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*' # The APIs above only support '*' resource.
+                
+  CTFlowLogCodeBuild:
+      Type: AWS::CodeBuild::Project
+      Properties:
+          ServiceRole: !GetAtt CTFlowLogCodeBuildRole.Arn
+          EncryptionKey: !Sub
+            - alias/${KMSKeyName}
+            - {KMSKeyName: !FindInMap [KMS, Alias, !Ref PipelineBranch]}
+          Source:
+              Type: CODEPIPELINE
+              BuildSpec: ".ci/buildspec-build.yml"
+          Environment:
+              ComputeType: BUILD_GENERAL1_SMALL
+              Image: "aws/codebuild/amazonlinux2-x86_64-standard:3.0"
+              Type: LINUX_CONTAINER
+              EnvironmentVariables:
+                  - Name: ARTIFACT_BUCKET
+                    Value: !Ref CTFlowLogPipelineArtifactS3Bucket
+                  - Name: TASKCAT_BUCKET
+                    Value: !Ref TaskCatBucket
+          Artifacts:
+              Name: !Sub ${CTFlowLogPipelineArtifactS3Bucket}-Built
+              Type: CODEPIPELINE
+          LogsConfig:
+            CloudWatchLogs:
+              Status: ENABLED
+
+  CTFlowLogCodeBuildTestRole:
+    Type: "AWS::IAM::Role"
+    Condition: IsPipelineTest
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "Allow Resource * for Cloudformation/SSM API: needs to support user defined cfn templates and ssm parameter names."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "CTFlowLog-CodeBuild-Test-Policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+              - Effect: "Allow"
+                Action:
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}/*
+                  - !Sub arn:${AWS::Partition}:s3:::${TaskCatBucket}/*
+              - Effect: "Allow"
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}/*
+              - Effect: "Allow"
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*
+              - Effect: "Allow"
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*' # The APIs above only support '*' resource.
+              - Effect: "Allow"
+                Action:
+                  - sts:AssumeRole
+                Resource: 
+                  - !GetAtt TaskCatMgtAdminRole.Arn
+                  - !Sub arn:${AWS::Partition}:iam::${FlowLogDestinationAccount}:role/AWSControlTowerExecution
+
+  CTFlowLogCodeBuildTest:
+      Type: AWS::CodeBuild::Project
+      Condition: IsPipelineTest
+      Properties:
+          ServiceRole: !GetAtt CTFlowLogCodeBuildTestRole.Arn
+          EncryptionKey: !Sub
+            - alias/${KMSKeyName}
+            - {KMSKeyName: !FindInMap [KMS, Alias, !Ref PipelineBranch]}
+          Source:
+              Type: CODEPIPELINE
+              BuildSpec: ".ci/buildspec-test.yml"
+          Environment:
+              ComputeType: BUILD_GENERAL1_SMALL
+              Image: "aws/codebuild/amazonlinux2-x86_64-standard:3.0"
+              Type: LINUX_CONTAINER
+              EnvironmentVariables:
+                  - Name: ARTIFACT_BUCKET
+                    Value: !Ref CTFlowLogPipelineArtifactS3Bucket
+                  - Name: TASKCAT_BUCKET
+                    Value: !Ref TaskCatBucket
+                  - Name: MGT_ASSUME_ROLE_ARN
+                    Value: !GetAtt TaskCatMgtAdminRole.Arn
+                  - Name: MGT_PROFILE_NAME
+                    Value: "mgt"
+                  - Name: LOGARCHIVE_ASSUME_ROLE_ARN
+                    Value: !Sub arn:${AWS::Partition}:iam::${FlowLogDestinationAccount}:role/AWSControlTowerExecution
+                  - Name: LOGARCHIVE_PROFILE_NAME
+                    Value: "log-archive"
+                  - Name: FLOWLOG_BUCKET_NAME
+                    Value: !Ref FlowLogBucketName
+          Artifacts:
+              Name: !Sub ${CTFlowLogPipelineArtifactS3Bucket}-Test
+              Type: CODEPIPELINE
+          LogsConfig:
+            CloudWatchLogs:
+              Status: ENABLED
+
+  CTFlowLogCodeBuildProdRole:
+    Type: "AWS::IAM::Role"
+    Condition: IsPipelineProd
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "Allow Resource * for Cloudformation/SSM API: needs to support user defined cfn templates and ssm parameter names."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "CTFlowLog-CodeBuild-Prod-Policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+              - Effect: "Allow"
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}/*
+                  - !Sub arn:${AWS::Partition}:s3:::${QSS3BucketName}/${QSS3KeyPrefix}*
+              - Effect: "Allow"
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${TaskCatBucket}
+                  - !Sub arn:${AWS::Partition}:s3:::${QSS3BucketName}
+              - Effect: "Allow"
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}/*
+              - Effect: "Allow"
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*
+              - Effect: "Allow"
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*' # The APIs above only support '*' resource.
+
+  CTFlowLogCodeBuildProd:
+      Type: AWS::CodeBuild::Project
+      Condition: IsPipelineProd
+      Properties:
+          ServiceRole: !GetAtt CTFlowLogCodeBuildProdRole.Arn
+          EncryptionKey: !Sub
+            - alias/${KMSKeyName}
+            - {KMSKeyName: !FindInMap [KMS, Alias, !Ref PipelineBranch]}
+          Source:
+              Type: CODEPIPELINE
+              BuildSpec: ".ci/buildspec-prod.yml"
+          Environment:
+              ComputeType: BUILD_GENERAL1_SMALL
+              Image: "aws/codebuild/amazonlinux2-x86_64-standard:3.0"
+              Type: LINUX_CONTAINER
+              EnvironmentVariables:
+                  - Name: ARTIFACT_BUCKET
+                    Value: !Ref CTFlowLogPipelineArtifactS3Bucket
+                  - Name: TASKCAT_BUCKET
+                    Value: !Ref TaskCatBucket
+                  - Name: QS_BUCKET
+                    Value: !Ref QSS3BucketName
+          Artifacts:
+              Name: !Sub ${CTFlowLogPipelineArtifactS3Bucket}-Prod
+              Type: CODEPIPELINE
+          LogsConfig:
+            CloudWatchLogs:
+              Status: ENABLED
+
+  CTFlowLogCodePipelineRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "The role name is defined to identify CT VPC FlowLog resources."
+          - id: W11
+            reason: "Allow Resource * for KMS/SSM API. KMS Service only support all resources. Key ID is generated by the service. SSM parameters are customer defined."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "CT-FlowLog-CodePipeline-Policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}
+              - Effect: "Allow"
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${CTFlowLogPipelineArtifactS3Bucket}/*
+              - Effect: Allow
+                Action:
+                - ssm:PutParameter
+                - ssm:GetParameter
+                - ssm:DeleteParameter
+                - ssm:GetParametersByPath
+                - ssm:DescribeParameters
+                Resource: '*'
+              - Effect: "Allow"
+                Action:
+                  - "codestar-connections:UseConnection"
+                Resource:
+                  - !Ref GitHubCodeStarConnection
+              - Effect: "Allow"
+                Action:
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                Resource:
+                  - !Sub arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CTFlowLogCodeBuild}
+                  - !If
+                    - IsPipelineProd
+                    - !Sub arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CTFlowLogCodeBuildProd}
+                    - !Ref AWS::NoValue
+                  - !If
+                    - IsPipelineTest
+                    - !Sub arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CTFlowLogCodeBuildTest}
+                    - !Ref AWS::NoValue
+              - Effect: "Allow"
+                Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - lambda:ListFunctions
+                  - lambda:ListVersionsByFunction
+                Resource: "*"
+              - !If
+                - IsPipelineApprovalStageCondition
+                - Effect: "Allow"
+                  Action:
+                    - "sns:Publish"
+                  Resource: !Ref PipelineApprovalTopic
+                - !Ref AWS::NoValue
+                
+  CTFlowLogCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: PipelineKMSKeyAlias
+    Properties:
+      RoleArn: !GetAtt CTFlowLogCodePipelineRole.Arn
+      ArtifactStore:
+        Location: !Ref CTFlowLogPipelineArtifactS3Bucket
+        Type: S3
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Version: "1"
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+              OutputArtifacts:
+                - Name: SourceApp
+              Configuration:
+                ConnectionArn: !Ref GitHubCodeStarConnection
+                BranchName: !Ref GitHubBranchName
+                FullRepositoryId: !Sub "${GitHubOwner}/${GitHubRepositoryName}"
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              InputArtifacts:
+                - Name: SourceApp
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: BuildApp
+              Configuration:
+                ProjectName: !Ref CTFlowLogCodeBuild
+        - !If
+          - IsPipelineTest
+          - Name: Test
+            Actions:
+              - Name: CodeBuild
+                InputArtifacts:
+                  - Name: BuildApp
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Version: "1"
+                  Provider: CodeBuild
+                OutputArtifacts:
+                  - Name: TestApp
+                Configuration:
+                  ProjectName: !Ref CTFlowLogCodeBuildTest
+          - !Ref AWS::NoValue
+        - !If
+          - IsPipelineApprovalStageCondition
+          - Name: Approval
+            Actions:
+              - Name: Approval
+                ActionTypeId:
+                  Category: Approval
+                  Owner: AWS
+                  Version: "1"
+                  Provider: Manual
+                RunOrder: 1
+                Configuration:
+                  NotificationArn: !Ref PipelineApprovalTopic
+          - !Ref AWS::NoValue
+        - !If
+          - IsPipelineProd
+          - Name: Prod
+            Actions:
+              - Name: CodeBuild
+                InputArtifacts:
+                  - Name: BuildApp
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Version: "1"
+                  Provider: CodeBuild
+                OutputArtifacts:
+                  - Name: ProdApp
+                Configuration:
+                  ProjectName: !Ref CTFlowLogCodeBuildProd
+          - !Ref AWS::NoValue
+
+  TaskCatMgtAdminRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Description: "IAM Role for TaskCat to perform administrative actions during test"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS:
+                - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+
+  SSMOrganizationId:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/OrganizationId"
+      Name: "/ct/vpc-flowlog/OrganizationId"
+      Type: String
+      Value: !Ref OrgId
+
+  SSMStackSetArn:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/StackSetArn"
+      Name: "/ct/vpc-flowlog/StackSetArn"
+      Type: String
+      Value: !Ref StackSetArn
+
+  SSMtCatBucketName:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/tCatBucketName"
+      Name: "/ct/vpc-flowlog/tCatBucketName"
+      Type: String
+      Value: !Ref TaskCatBucket
+
+  SSMtCatKeyPrefix:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/tCatKeyPrefix"
+      Name: "/ct/vpc-flowlog/tCatKeyPrefix"
+      Type: String
+      Value: !Ref TaskCatKeyPrefix
+     
+  SSMQSS3BucketName:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/QSS3BucketName"
+      Name: "/ct/vpc-flowlog/QSS3BucketName"
+      Type: String
+      Value: !Ref QSS3BucketName
+      
+  SSMQSS3KeyPrefix:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/QSS3KeyPrefix"
+      Name: "/ct/vpc-flowlog/QSS3KeyPrefix"
+      Type: String
+      Value: !Ref QSS3KeyPrefix
+
+  SSMStackSetName:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/StackSetName"
+      Name: "/ct/vpc-flowlog/StackSetName"
+      Type: String
+      Value: !Ref StackSetName
+
+  SSMMasterAccount:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/MasterAccount"
+      Name: "/ct/vpc-flowlog/MasterAccount"
+      Type: String
+      Value: !Ref MasterAccount
+
+  SSMMasterRegion:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/MasterRegion"
+      Name: "/ct/vpc-flowlog/MasterRegion"
+      Type: String
+      Value: !Ref MasterRegion
+
+  SSMFlowLogDestinationAccount:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/FlowLogDestinationAccount"
+      Name: "/ct/vpc-flowlog/FlowLogDestinationAccount"
+      Type: String
+      Value: !Ref FlowLogDestinationAccount
+  
+  SSMFlowLogBucketName:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/FlowLogBucketName"
+      Name: "/ct/vpc-flowlog/FlowLogBucketName"
+      Type: String
+      Value: !Ref FlowLogBucketName
+
+  SSMEventBusDestinationAccount:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/EventBusDestinationAccount"
+      Name: "/ct/vpc-flowlog/EventBusDestinationAccount"
+      Type: String
+      Value: !Ref EventBusDestinationAccount
+      
+  SSMEventBusName:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/EventBusName"
+      Name: "/ct/vpc-flowlog/EventBusName"
+      Type: String
+      Value: !Ref EventBusName
+
+  SSMComplianceFrequency:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/ComplianceFrequency"
+      Name: "/ct/vpc-flowlog/ComplianceFrequency"
+      Type: String
+      Value: !Ref ComplianceFrequency
+
+  SSMSSEAlgorithm:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/SSEAlgorithm"
+      Name: "/ct/vpc-flowlog/SSEAlgorithm"
+      Type: String
+      Value: "AES256"
+
+  SSMKMSMasterKeyID:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/KMSMasterKeyID"
+      Name: "/ct/vpc-flowlog/KMSMasterKeyID"
+      Type: String
+      Value: " "
+
+  SSMTaskCatTargetAccounts:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/tCatTargetAccounts"
+      Name: "/ct/vpc-flowlog/tCatTargetAccounts"
+      Type: String
+      Value: !Ref TaskCatTargetAccounts
+
+  SSMTaskCatTargetRegions:
+    Type: AWS::SSM::Parameter
+    Condition: IsDeploySSMParams
+    Properties: 
+      Description: "taskcat_ssm_/ct/vpc-flowlog/tCatTargetRegion"
+      Name: "/ct/vpc-flowlog/tCatTargetRegion"
+      Type: String
+      Value: !Ref TaskCatTargetRegions
